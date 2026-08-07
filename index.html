@@ -388,7 +388,7 @@ kbd{background:var(--card-2);border:1px solid var(--line);border-radius:6px;padd
 </script>
 <script>
 /* ---------- VERSION ---------- */
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "1.0.3";
 
 /* ---------- STORAGE SHIM (localStorage + memory fallback) ---------- */
 const store = (()=>{ let mem={}; let ok=true;
@@ -753,14 +753,19 @@ async function loadFFmpeg(onStatus){
     const ff = new FFmpeg();
     ff.on('progress', ({progress})=>{ if(FF._pcb && progress>=0 && progress<=1) FF._pcb(Math.round(progress*100)); });
     const build = async(useMt)=>{
-      const bases=ffCoreBases(useMt);
-      const cfg={
-        classWorkerURL,
-        coreURL: await firstOkBlob(bases,'ffmpeg-core.js','text/javascript',toBlobURL),
-        wasmURL: await firstOkBlob(bases,'ffmpeg-core.wasm','application/wasm',toBlobURL),
-      };
-      if(useMt) cfg.workerURL = await firstOkBlob(bases,'ffmpeg-core.worker.js','text/javascript',toBlobURL);
-      await ff.load(cfg);
+      // Core + wasm as DIRECT urls: importScripts() inside the (same-origin
+      // blob) class worker is allowed to pull cross-origin scripts, and
+      // Emscripten resolves the .wasm itself. Blobbing the core is what broke
+      // it ("Cannot find module 'blob:'"). Only the class worker must be blob.
+      const bases=ffCoreBases(useMt); let err;
+      for(const base of bases){
+        try{
+          const cfg={ classWorkerURL, coreURL:base+'/ffmpeg-core.js', wasmURL:base+'/ffmpeg-core.wasm' };
+          if(useMt) cfg.workerURL=base+'/ffmpeg-core.worker.js';
+          await ff.load(cfg); return;
+        }catch(e){ err=e; }
+      }
+      throw err;
     };
     try{ await build(mt); }
     catch(e){ // fall back to single-thread if mt failed
