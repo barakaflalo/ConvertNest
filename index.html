@@ -388,7 +388,7 @@ kbd{background:var(--card-2);border:1px solid var(--line);border-radius:6px;padd
 </script>
 <script>
 /* ---------- VERSION ---------- */
-const APP_VERSION = "1.0.3";
+const APP_VERSION = "1.0.4";
 
 /* ---------- STORAGE SHIM (localStorage + memory fallback) ---------- */
 const store = (()=>{ let mem={}; let ok=true;
@@ -445,7 +445,7 @@ const LANG = {
     tour4_t:"Optional AI (Pro)", tour4_b:"Add your own API key to unlock transcription, summaries and image descriptions.",
     tour_skip:"Skip", tour_next:"Next", tour_done:"Get started",
     confirm_clear_hist:"Clear all conversion history?", restore_ok:"Settings restored.", restore_bad:"Invalid backup file.",
-    result_size:"Size", first_run_note:"First audio/video conversion downloads the engine (~31MB), then it's cached.",
+    pdf_no_text:"No text found — this looks like a scanned (image) PDF, so there is no text layer to extract.", result_size:"Size", first_run_note:"First audio/video conversion downloads the engine (~31MB), then it's cached.",
     guide_title:"How it works",
     src_image:"Source image", src_audio:"Audio file", both_needed:"Add both an image and an audio file.",
   },
@@ -482,7 +482,7 @@ const LANG = {
     tour4_t:"בינה אופציונלית (Pro)", tour4_b:"הוסף מפתח API משלך כדי לפתוח תמלול, סיכומים ותיאורי תמונה.",
     tour_skip:"דלג", tour_next:"הבא", tour_done:"בואו נתחיל",
     confirm_clear_hist:"לנקות את כל היסטוריית ההמרות?", restore_ok:"ההגדרות שוחזרו.", restore_bad:"קובץ גיבוי לא תקין.",
-    result_size:"גודל", first_run_note:"המרת האודיו/וידאו הראשונה מורידה את המנוע (~31MB), אחר כך הוא נשמר במטמון.",
+    pdf_no_text:"לא נמצא טקסט — נראה שזה PDF סרוק (תמונה), ולכן אין שכבת טקסט לחילוץ.", result_size:"גודל", first_run_note:"המרת האודיו/וידאו הראשונה מורידה את המנוע (~31MB), אחר כך הוא נשמר במטמון.",
     guide_title:"איך זה עובד",
     src_image:"תמונת מקור", src_audio:"קובץ אודיו", both_needed:"הוסף גם תמונה וגם קובץ אודיו.",
   },
@@ -686,7 +686,7 @@ const cdnjs = (lib,ver,path)=>[`https://cdnjs.cloudflare.com/ajax/libs/${lib}/${
 
 /* ---------- LIBRARY MANAGERS (lazy) ---------- */
 const LIB={};
-LIB.jspdf = ()=>loadScript([...cdnjs('jspdf','2.5.2','jspdf.umd.min.js'),...cdn('jspdf','2.5.2','dist/jspdf.umd.min.js')], ()=>window.jspdf);
+LIB.jspdf = ()=>loadScript([...cdn('jspdf','2.5.2','dist/jspdf.umd.min.js'),...cdnjs('jspdf','2.5.2','jspdf.umd.min.js')], ()=>window.jspdf);
 LIB.pdfjs = async ()=>{ if(window.pdfjsLib)return window.pdfjsLib;
   await loadScript([...cdn('pdfjs-dist','3.11.174','build/pdf.min.js'), ...cdnjs('pdf.js','3.11.174','pdf.min.js')], ()=>window.pdfjsLib);
   window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
@@ -695,7 +695,8 @@ LIB.xlsx = ()=>loadScript([...cdnjs('xlsx','0.18.5','xlsx.full.min.js'),...cdn('
 LIB.mammoth = ()=>loadScript([...cdn('mammoth','1.6.0','mammoth.browser.min.js')], ()=>window.mammoth);
 LIB.heic = ()=>loadScript([...cdn('heic2any','0.0.4','dist/heic2any.min.js')], ()=>window.heic2any);
 LIB.yaml = ()=>loadScript([...cdnjs('js-yaml','4.1.0','js-yaml.min.js'),...cdn('js-yaml','4.1.0','dist/js-yaml.min.js')], ()=>window.jsyaml);
-LIB.qr = ()=>loadScript([...cdnjs('qrcodejs','1.0.0','qrcode.min.js')], ()=>window.QRCode);
+/* node-qrcode encodes UTF-8 correctly (the old qrcodejs mangled Hebrew). */
+LIB.qr = ()=>loadScript([...cdn('qrcode','1.5.3','build/qrcode.min.js')], ()=>window.QRCode && window.QRCode.toCanvas);
 </script>
 <script>
 /* ============================================================
@@ -706,7 +707,9 @@ LIB.qr = ()=>loadScript([...cdnjs('qrcodejs','1.0.0','qrcode.min.js')], ()=>wind
    - Multi-CDN, blob-URL loading (bypasses COEP), lazy (~31MB once).
    ============================================================ */
 const FF = { instance:null, loaded:false, loading:null, util:null };
-const FF_VER="0.12.15", FF_UTIL_VER="0.12.2", FF_CORE_VER="0.12.10";
+/* Documented working pair: @ffmpeg/ffmpeg 0.12.10 ↔ @ffmpeg/core(-mt) 0.12.6.
+   (core is versioned separately from the main package — 0.12.10 core does NOT exist.) */
+const FF_VER="0.12.10", FF_UTIL_VER="0.12.2", FF_CORE_VER="0.12.6";
 
 function ffCoreBases(mt){
   const pkg = mt?'@ffmpeg/core-mt':'@ffmpeg/core';
@@ -952,8 +955,9 @@ function b64DecodeText(t){ return decodeURIComponent(escape(atob(t.trim()))); }
 function fileToDataURI(file){ return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);}); }
 function textToHex(t){ return Array.from(new TextEncoder().encode(t)).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
 function hexToText(h){ const bytes=h.trim().split(/\s+/).map(x=>parseInt(x,16)); return new TextDecoder().decode(new Uint8Array(bytes)); }
-async function textToQR(t){ await LIB.qr(); const holder=el('div'); new window.QRCode(holder,{text:t,width:512,height:512,correctLevel:window.QRCode.CorrectLevel.M});
-  await new Promise(r=>setTimeout(r,120)); const cv=holder.querySelector('canvas'); return canvasToBlob(cv,'image/png',1); }
+async function textToQR(t){ await LIB.qr(); const cv=el('canvas');
+  await window.QRCode.toCanvas(cv, t, {width:512, margin:2, errorCorrectionLevel:'M'});
+  return canvasToBlob(cv,'image/png',1); }
 </script>
 <script>
 /* ============================================================
@@ -1020,7 +1024,7 @@ const CONVERTERS = {
     run:async(f,o,p)=>{ const r=await pdfToImages(f,{format:o.format,allPages:o.allPages,page:+o.page||1},p); return {blob:r.blob,name:renameExt(f.name,r.ext)}; } },
 
   pdf_to_text:{ cat:'doc', title:"PDF → טקסט", desc:"חילוץ הטקסט מקובץ PDF", in:'file', accept:".pdf,application/pdf", out:'text',
-    opts:[], run:async(f,o,p)=>{ const b=await pdfToText(f); return {text:await b.text(),name:renameExt(f.name,'txt')}; } },
+    opts:[], run:async(f,o,p)=>{ const b=await pdfToText(f); const txt=await b.text(); return {text: txt.trim()? txt : T('pdf_no_text'), name:renameExt(f.name,'txt')}; } },
 
   text_to_pdf:{ cat:'doc', title:"טקסט → PDF", desc:"הדבק טקסט וקבל מסמך PDF", in:'text',
     opts:[], run:async(t,o,p)=>{ const b=await textToPDF(t); return {blob:b,name:'document.pdf'}; } },
