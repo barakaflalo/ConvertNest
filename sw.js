@@ -3,7 +3,7 @@
    Strategy: cache-first for the same-origin app shell; pass-through
    (network only) for cross-origin requests so ffmpeg/CDN & blob URLs
    and cross-origin-isolation headers are never touched. */
-const VERSION = "convertnest-v1.0.4";
+const VERSION = "convertnest-v1.0.5";
 const CORE = [
   "./",
   "./index.html",
