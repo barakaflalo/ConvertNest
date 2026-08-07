@@ -388,7 +388,7 @@ kbd{background:var(--card-2);border:1px solid var(--line);border-radius:6px;padd
 </script>
 <script>
 /* ---------- VERSION ---------- */
-const APP_VERSION = "1.0.1";
+const APP_VERSION = "1.0.2";
 
 /* ---------- STORAGE SHIM (localStorage + memory fallback) ---------- */
 const store = (()=>{ let mem={}; let ok=true;
@@ -720,38 +720,42 @@ async function firstOkBlob(bases, file, mime, toBlobURL){
   for(const b of bases){ try{ return await toBlobURL(`${b}/${file}`, mime); }catch(e){ lastErr=e; } }
   throw lastErr||new Error('blob load failed');
 }
-/* dynamic ESM import with multi-CDN fallback (golden rule: never one CDN) */
-async function importFirst(urls){
-  let last;
-  for(const u of urls){ try{ return await import(u); }catch(e){ last=e; } }
-  throw last||new Error('import failed');
-}
+/* local toBlobURL — fetch a cross-origin asset and serve it as a SAME-ORIGIN
+   blob. This both avoids the broken @ffmpeg/util UMD and lets us hand ffmpeg a
+   same-origin worker URL (fixes "Failed to construct 'Worker' ... cannot be
+   accessed from origin"). */
+FF.toBlobURL = async (url,mime)=>{ const r=await fetch(url); if(!r.ok) throw new Error('fetch '+r.status); return URL.createObjectURL(new Blob([await r.arrayBuffer()],{type:mime})); };
+
 async function loadFFmpeg(onStatus){
   if(FF.loaded) return FF.instance;
   if(FF.loading) return FF.loading;
   FF.loading=(async()=>{
     onStatus && onStatus(T('downloading_engine'),0);
-    // @ffmpeg/ffmpeg & @ffmpeg/util are ESM-first (0.12). Load them as real
-    // modules via dynamic import() with multi-CDN fallback — NOT as classic
-    // <script>, which throws "exports is not defined".
-    const ffMod = await importFirst([
-      `https://esm.sh/@ffmpeg/ffmpeg@${FF_VER}`,
-      `https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@${FF_VER}/+esm`,
-    ]);
-    const utilMod = await importFirst([
-      `https://esm.sh/@ffmpeg/util@${FF_UTIL_VER}`,
-      `https://cdn.jsdelivr.net/npm/@ffmpeg/util@${FF_UTIL_VER}/+esm`,
-    ]);
-    const FFmpeg = ffMod.FFmpeg || (ffMod.default && ffMod.default.FFmpeg);
-    const toBlobURL = utilMod.toBlobURL, fetchFile = utilMod.fetchFile;
-    if(!FFmpeg || !toBlobURL) throw new Error('ffmpeg modules missing exports');
-    FF.util={ toBlobURL, fetchFile };
+    const toBlobURL = FF.toBlobURL;
+    const ffBases=[
+      `https://unpkg.com/@ffmpeg/ffmpeg@${FF_VER}/dist/umd`,
+      `https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@${FF_VER}/dist/umd`,
+    ];
+    // 1) main UMD (exposes window.FFmpegWASM.FFmpeg). ffmpeg.js IS proper UMD;
+    //    only @ffmpeg/util's UMD was broken, so we don't use util at all.
+    await loadScript(ffBases.map(b=>b+'/ffmpeg.js'), ()=>window.FFmpegWASM && window.FFmpegWASM.FFmpeg);
+    const { FFmpeg } = window.FFmpegWASM;
+    FF.util={ toBlobURL, fetchFile: fileToU8 };
+    // 2) class worker → load same-origin as a blob. Derive the chunk filename
+    //    from the main source so it survives version bumps.
+    let classWorkerURL;
+    for(const b of ffBases){
+      try{ const r=await fetch(b+'/ffmpeg.js'); if(!r.ok) continue; const src=await r.text();
+        const wm=src.match(/(\d+\.ffmpeg\.js)/); const wf=wm?wm[1]:'814.ffmpeg.js';
+        classWorkerURL=await toBlobURL(b+'/'+wf,'text/javascript'); break; }catch(e){}
+    }
     const mt = (typeof window.crossOriginIsolated!=='undefined' && window.crossOriginIsolated===true && typeof SharedArrayBuffer!=='undefined');
     const ff = new FFmpeg();
     ff.on('progress', ({progress})=>{ if(FF._pcb && progress>=0 && progress<=1) FF._pcb(Math.round(progress*100)); });
     const build = async(useMt)=>{
       const bases=ffCoreBases(useMt);
       const cfg={
+        classWorkerURL,
         coreURL: await firstOkBlob(bases,'ffmpeg-core.js','text/javascript',toBlobURL),
         wasmURL: await firstOkBlob(bases,'ffmpeg-core.wasm','application/wasm',toBlobURL),
       };
