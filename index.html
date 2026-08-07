@@ -389,7 +389,7 @@ kbd{background:var(--card-2);border:1px solid var(--line);border-radius:6px;padd
 </script>
 <script>
 /* ---------- VERSION ---------- */
-const APP_VERSION = "1.0.7";
+const APP_VERSION = "1.1.0";
 
 /* ---------- STORAGE SHIM (localStorage + memory fallback) ---------- */
 const store = (()=>{ let mem={}; let ok=true;
@@ -446,7 +446,7 @@ const LANG = {
     tour4_t:"Optional AI (Pro)", tour4_b:"Add your own API key to unlock transcription, summaries and image descriptions.",
     tour_skip:"Skip", tour_next:"Next", tour_done:"Get started",
     confirm_clear_hist:"Clear all conversion history?", restore_ok:"Settings restored.", restore_bad:"Invalid backup file.",
-    pdf_no_text:"No text found — this looks like a scanned (image) PDF, so there is no text layer to extract.", test_engine:"Test media engine", engine_loading:"Loading media engine…", engine_ok:"Media engine ready ✓", engine_fail:"Media engine failed to load", result_size:"Size", first_run_note:"First audio/video conversion downloads the engine (~31MB), then it's cached.",
+    opt_start:"Start (mm:ss)", opt_end:"End (mm:ss, empty = to end)", opt_pages:"Pages to remove (e.g. 2,5-7)", qr_no_code:"No code found in the image.", pdf_no_text:"No text found — this looks like a scanned (image) PDF, so there is no text layer to extract.", test_engine:"Test media engine", engine_loading:"Loading media engine…", engine_ok:"Media engine ready ✓", engine_fail:"Media engine failed to load", result_size:"Size", first_run_note:"First audio/video conversion downloads the engine (~31MB), then it's cached.",
     guide_title:"How it works",
     src_image:"Source image", src_audio:"Audio file", both_needed:"Add both an image and an audio file.",
   },
@@ -483,7 +483,7 @@ const LANG = {
     tour4_t:"בינה אופציונלית (Pro)", tour4_b:"הוסף מפתח API משלך כדי לפתוח תמלול, סיכומים ותיאורי תמונה.",
     tour_skip:"דלג", tour_next:"הבא", tour_done:"בואו נתחיל",
     confirm_clear_hist:"לנקות את כל היסטוריית ההמרות?", restore_ok:"ההגדרות שוחזרו.", restore_bad:"קובץ גיבוי לא תקין.",
-    pdf_no_text:"לא נמצא טקסט — נראה שזה PDF סרוק (תמונה), ולכן אין שכבת טקסט לחילוץ.", test_engine:"בדוק מנוע מדיה", engine_loading:"טוען מנוע מדיה…", engine_ok:"מנוע המדיה מוכן ✓", engine_fail:"טעינת מנוע המדיה נכשלה", result_size:"גודל", first_run_note:"המרת האודיו/וידאו הראשונה מורידה את המנוע (~31MB), אחר כך הוא נשמר במטמון.",
+    opt_start:"התחלה (mm:ss)", opt_end:"סוף (mm:ss, ריק = עד הסוף)", opt_pages:"עמודים למחיקה (למשל 2,5-7)", qr_no_code:"לא נמצא קוד בתמונה.", pdf_no_text:"לא נמצא טקסט — נראה שזה PDF סרוק (תמונה), ולכן אין שכבת טקסט לחילוץ.", test_engine:"בדוק מנוע מדיה", engine_loading:"טוען מנוע מדיה…", engine_ok:"מנוע המדיה מוכן ✓", engine_fail:"טעינת מנוע המדיה נכשלה", result_size:"גודל", first_run_note:"המרת האודיו/וידאו הראשונה מורידה את המנוע (~31MB), אחר כך הוא נשמר במטמון.",
     guide_title:"איך זה עובד",
     src_image:"תמונת מקור", src_audio:"קובץ אודיו", both_needed:"הוסף גם תמונה וגם קובץ אודיו.",
   },
@@ -898,6 +898,8 @@ async function videoToGif(file,{fps=12,width=480},onProgress){
    ============================================================ */
 LIB.zip=()=>loadScript([...cdnjs('jszip','3.10.1','jszip.min.js'),...cdn('jszip','3.10.1','dist/jszip.min.js')],()=>window.JSZip);
 LIB.marked=()=>loadScript([...cdnjs('marked','12.0.2','marked.min.js'),...cdn('marked','12.0.2','marked.min.js')],()=>window.marked);
+LIB.pdflib=()=>loadScript([...cdn('pdf-lib','1.17.1','dist/pdf-lib.min.js'),...cdnjs('pdf-lib','1.17.1','pdf-lib.min.js')],()=>window.PDFLib);
+LIB.zxing=()=>loadScript([...cdn('@zxing/library','0.21.3','umd/index.min.js'),...cdnjs('zxing-library','0.21.3','umd/index.min.js')],()=>window.ZXing);
 
 async function pdfToImages(file,{format='image/png',allPages=false,page=1},onProgress){
   const pdfjs=await LIB.pdfjs();
@@ -972,6 +974,88 @@ async function textToQR(t){
   for(let r=0;r<n;r++)for(let c=0;c<n;c++){ if(qr.isDark(r,c)) ctx.fillRect(margin+c*cell,margin+r*cell,cell,cell); }
   return canvasToBlob(cv,'image/png',1);
 }
+
+/* ============================================================
+   NEW ENGINES (v1.1): trim · PDF tools · batch · QR reader
+   ============================================================ */
+function parseTime(v){ // "90" | "1:30" | "1:02:03" -> seconds
+  if(v==null||v==='') return 0;
+  const p=String(v).trim().split(':').map(Number);
+  if(p.some(isNaN)) return 0;
+  return p.reduce((a,b)=>a*60+b,0);
+}
+function parseRanges(str,total){ // "2,5-7" (1-based) -> Set of 0-based indices
+  const set=new Set();
+  String(str||'').split(',').forEach(part=>{ part=part.trim(); if(!part)return;
+    const m=part.match(/^(\d+)\s*-\s*(\d+)$/);
+    if(m){ let a=+m[1],b=+m[2]; if(a>b)[a,b]=[b,a]; for(let i=a;i<=b;i++) if(i>=1&&i<=total) set.add(i-1); }
+    else { const n=+part; if(n>=1&&n<=total) set.add(n-1); }
+  });
+  return set;
+}
+/* trim audio/video, preserving container (fast stream copy) */
+async function trimMedia(file,start,end,onProgress){
+  const ext=(extOf(file)||'.mp4').slice(1); const inName='input.'+ext, outName='out.'+ext;
+  const args=['-ss',String(start||0),'-i',inName];
+  if(end>0 && end>start) args.push('-t',String(end-(start||0)));
+  args.push('-c','copy',outName);
+  let out;
+  try{ out=await runFFmpeg([{name:inName,data:await fileToU8(file)}],args,outName,onProgress); }
+  catch(e){ // some formats can't stream-copy after seek → re-encode fallback
+    const a2=['-ss',String(start||0),'-i',inName]; if(end>0&&end>start)a2.push('-t',String(end-(start||0))); a2.push(outName);
+    out=await runFFmpeg([{name:inName,data:await fileToU8(file)}],a2,outName,onProgress);
+  }
+  return new Blob([out],{type:mimeFor(ext)});
+}
+/* PDF: merge / split / delete pages / compress */
+async function pdfMerge(files,onProgress){
+  await LIB.pdflib(); const {PDFDocument}=window.PDFLib; const out=await PDFDocument.create();
+  for(let i=0;i<files.length;i++){ onProgress&&onProgress(T('processing'),Math.round(i/files.length*100));
+    const src=await PDFDocument.load(await files[i].arrayBuffer()); const pg=await out.copyPages(src,src.getPageIndices()); pg.forEach(p=>out.addPage(p)); }
+  return new Blob([await out.save()],{type:'application/pdf'});
+}
+async function pdfSplit(file,onProgress){
+  await LIB.pdflib(); await LIB.zip(); const {PDFDocument}=window.PDFLib;
+  const src=await PDFDocument.load(await file.arrayBuffer()); const n=src.getPageCount(); const zip=new window.JSZip();
+  for(let i=0;i<n;i++){ onProgress&&onProgress(T('processing'),Math.round(i/n*100));
+    const d=await PDFDocument.create(); const [p]=await d.copyPages(src,[i]); d.addPage(p);
+    zip.file(`page-${String(i+1).padStart(2,'0')}.pdf`, await d.save()); }
+  return new Blob([await zip.generateAsync({type:'blob'})],{type:'application/zip'});
+}
+async function pdfDeletePages(file,ranges){
+  await LIB.pdflib(); const {PDFDocument}=window.PDFLib;
+  const src=await PDFDocument.load(await file.arrayBuffer()); const n=src.getPageCount();
+  const remove=parseRanges(ranges,n); const keep=[]; for(let i=0;i<n;i++) if(!remove.has(i)) keep.push(i);
+  const out=await PDFDocument.create(); const pg=await out.copyPages(src,keep); pg.forEach(p=>out.addPage(p));
+  return new Blob([await out.save()],{type:'application/pdf'});
+}
+async function pdfCompress(file,quality,onProgress){ // rasterize pages → smaller (note: loses selectable text)
+  const pdfjs=await LIB.pdfjs(); await LIB.jspdf(); const {jsPDF}=window.jspdf;
+  const doc=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise; let pdf;
+  for(let i=1;i<=doc.numPages;i++){ onProgress&&onProgress(T('processing'),Math.round(i/doc.numPages*100));
+    const pg=await doc.getPage(i); const vp=pg.getViewport({scale:1.4}); const cv=el('canvas'); cv.width=vp.width; cv.height=vp.height;
+    const ctx=cv.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,cv.width,cv.height);
+    await pg.render({canvasContext:ctx,viewport:vp}).promise;
+    const data=cv.toDataURL('image/jpeg',quality); const orient=cv.width>cv.height?'l':'p';
+    if(i===1) pdf=new jsPDF({orientation:orient,unit:'px',format:[cv.width,cv.height]}); else pdf.addPage([cv.width,cv.height],orient);
+    pdf.addImage(data,'JPEG',0,0,cv.width,cv.height); }
+  return pdf.output('blob');
+}
+/* batch: run a per-file fn over many files, zip the results */
+async function runBatch(files,perFile,onProgress){
+  await LIB.zip(); const zip=new window.JSZip();
+  for(let i=0;i<files.length;i++){ onProgress&&onProgress(T('processing'),Math.round(i/files.length*100));
+    try{ const {blob,name}=await perFile(files[i]); zip.file(name,blob); }catch(e){ /* skip bad file */ } }
+  return new Blob([await zip.generateAsync({type:'blob'})],{type:'application/zip'});
+}
+/* QR / barcode reader: image -> text (ZXing) */
+async function readCode(file){
+  await LIB.zxing(); const url=URL.createObjectURL(file);
+  try{ const reader=new window.ZXing.BrowserMultiFormatReader(); const res=await reader.decodeFromImageUrl(url); return res.text; }
+  catch(e){ return T('qr_no_code'); }
+  finally{ URL.revokeObjectURL(url); }
+}
+
 </script>
 <script>
 /* ============================================================
@@ -1001,6 +1085,14 @@ const CONVERTERS = {
   imgs_to_pdf:{ cat:'image', title:"תמונות → PDF", desc:"אחד או כמה עמודים", in:'files', accept:IMG_ACCEPT,
     opts:[], run:async(fs,o,p)=>{ const b=await imagesToPDF(fs); return {blob:b,name:'images.pdf'}; } },
 
+  batch_image_convert:{ cat:'image', title:"המרת תמונות באצווה", desc:"המר הרבה תמונות בבת אחת (ZIP)", in:'files', accept:IMG_ACCEPT,
+    opts:[
+      {type:'seg',key:'to',label:'opt_format',def:'image/jpeg',options:[['image/jpeg','JPG'],['image/png','PNG'],['image/webp','WEBP']]},
+      {type:'range',key:'quality',label:'opt_quality',min:10,max:100,step:5,def:85,fmt:v=>v+'%',scale:0.01},
+      {type:'number',key:'width',label:'opt_size',def:0},
+    ],
+    run:async(fs,o,p)=>{ const ext=extFromMime(o.to); const b=await runBatch(fs, async(f)=>{ const blob=await imageConvert(f,{to:o.to,quality:o.quality,width:+o.width||0}); return {blob,name:renameExt(f.name,ext)}; }, p); return {blob:b,name:'converted-images.zip'}; } },
+
   /* ---------- AUDIO ---------- */
   audio_convert:{ cat:'audio', title:"אודיו → MP3 · WAV · M4A · OGG · FLAC", desc:"המרה בין פורמטי שמע", in:'file', accept:AUD_ACCEPT, tag:'ff',
     opts:[{type:'seg',key:'to',label:'opt_format',def:'mp3',options:[['mp3','MP3'],['wav','WAV'],['m4a','M4A'],['ogg','OGG'],['flac','FLAC'],['opus','OPUS']]}],
@@ -1008,6 +1100,10 @@ const CONVERTERS = {
 
   extract_audio:{ cat:'audio', title:"וידאו → MP3", desc:"חילוץ פס הקול מסרטון", in:'file', accept:VID_ACCEPT, tag:'ff',
     opts:[], run:async(f,o,p)=>{ const b=await mediaConvert(f,'mp3',['-vn','-c:a','libmp3lame','-b:a','192k'],p); return {blob:b,name:renameExt(f.name,'mp3')}; } },
+
+  audio_trim:{ cat:'audio', title:"חיתוך אודיו", desc:"בחר קטע (התחלה/סוף)", in:'file', accept:AUD_ACCEPT, tag:'ff',
+    opts:[{type:'time',key:'start',label:'opt_start',def:'0:00'},{type:'time',key:'end',label:'opt_end',def:''}],
+    run:async(f,o,p)=>{ const b=await trimMedia(f,parseTime(o.start),parseTime(o.end),p); return {blob:b,name:renameExt(f.name,'trim.'+((extOf(f)||'.mp3').slice(1)))}; } },
 
   /* ---------- VIDEO ---------- */
   mp3_to_mp4:{ cat:'video', title:"MP3 + תמונה → MP4", desc:"הפוך אודיו לסרטון וידאו", in:'imgaudio', tag:'ff', featured:true,
@@ -1030,12 +1126,27 @@ const CONVERTERS = {
     opts:[{type:'range',key:'crf',label:'opt_quality',min:20,max:34,step:1,def:28,fmt:v=>'CRF '+v}],
     run:async(f,o,p)=>{ const b=await mediaConvert(f,'mp4',['-c:v','libx264','-crf',String(o.crf),'-preset','veryfast','-c:a','aac','-b:a','128k','-pix_fmt','yuv420p'],p); return {blob:b,name:renameExt(f.name,'min.mp4')}; } },
 
+  video_trim:{ cat:'video', title:"חיתוך וידאו", desc:"בחר קטע (התחלה/סוף)", in:'file', accept:VID_ACCEPT, tag:'ff',
+    opts:[{type:'time',key:'start',label:'opt_start',def:'0:00'},{type:'time',key:'end',label:'opt_end',def:''}],
+    run:async(f,o,p)=>{ const b=await trimMedia(f,parseTime(o.start),parseTime(o.end),p); return {blob:b,name:renameExt(f.name,'trim.'+((extOf(f)||'.mp4').slice(1)))}; } },
+
   /* ---------- DOCUMENTS ---------- */
   pdf_to_img:{ cat:'doc', title:"PDF → תמונות", desc:"עמוד בודד או כל העמודים (ZIP)", in:'file', accept:".pdf,application/pdf",
     opts:[{type:'seg',key:'format',label:'opt_format',def:'image/png',options:[['image/png','PNG'],['image/jpeg','JPG']]},
           {type:'toggle',key:'allPages',label:'opt_all_pages',def:false},
           {type:'number',key:'page',label:'opt_page',def:1}],
     run:async(f,o,p)=>{ const r=await pdfToImages(f,{format:o.format,allPages:o.allPages,page:+o.page||1},p); return {blob:r.blob,name:renameExt(f.name,r.ext)}; } },
+
+  pdf_merge:{ cat:'doc', title:"מיזוג PDF", desc:"איחוד כמה קבצי PDF לאחד", in:'files', accept:".pdf,application/pdf",
+    opts:[], run:async(fs,o,p)=>{ const b=await pdfMerge(fs,p); return {blob:b,name:'merged.pdf'}; } },
+  pdf_split:{ cat:'doc', title:"פיצול PDF", desc:"כל עמוד לקובץ נפרד (ZIP)", in:'file', accept:".pdf,application/pdf",
+    opts:[], run:async(f,o,p)=>{ const b=await pdfSplit(f,p); return {blob:b,name:renameExt(f.name,'zip')}; } },
+  pdf_delete:{ cat:'doc', title:"מחיקת עמודים מ-PDF", desc:"למשל: 2,5-7", in:'file', accept:".pdf,application/pdf",
+    opts:[{type:'text',key:'pages',label:'opt_pages',def:'',placeholder:'2,5-7'}],
+    run:async(f,o,p)=>{ if(!o.pages||!(''+o.pages).trim())throw new Error(T('opt_pages')); const b=await pdfDeletePages(f,o.pages); return {blob:b,name:renameExt(f.name,'edited.pdf')}; } },
+  pdf_compress:{ cat:'doc', title:"דחיסת PDF", desc:"מקטין גודל (הופך לתמונות)", in:'file', accept:".pdf,application/pdf",
+    opts:[{type:'range',key:'quality',label:'opt_quality',min:30,max:90,step:5,def:60,fmt:v=>v+'%',scale:0.01}],
+    run:async(f,o,p)=>{ const b=await pdfCompress(f,o.quality,p); return {blob:b,name:renameExt(f.name,'min.pdf')}; } },
 
   pdf_to_text:{ cat:'doc', title:"PDF → טקסט", desc:"חילוץ הטקסט מקובץ PDF", in:'file', accept:".pdf,application/pdf", out:'text',
     opts:[], run:async(f,o,p)=>{ const b=await pdfToText(f); const txt=await b.text(); return {text: txt.trim()? txt : T('pdf_no_text'), name:renameExt(f.name,'txt')}; } },
@@ -1076,6 +1187,8 @@ const CONVERTERS = {
   text_to_hex:{ cat:'tool', title:"טקסט → Hex", desc:"", in:'text', out:'text', opts:[], run:async(t)=>({text:textToHex(t)}) },
   hex_to_text:{ cat:'tool', title:"Hex → טקסט", desc:"", in:'text', out:'text', opts:[], run:async(t)=>({text:hexToText(t)}) },
   text_to_qr:{ cat:'tool', title:"טקסט → QR", desc:"צור קוד QR מטקסט/קישור", in:'text', opts:[], run:async(t)=>{ const b=await textToQR(t); return {blob:b,name:'qr.png'}; } },
+  qr_read:{ cat:'tool', title:"קריאת QR / ברקוד", desc:"תמונה של קוד → טקסט", in:'file', accept:IMG_ACCEPT, out:'text',
+    opts:[], run:async(f)=>({text:await readCode(f),name:'qr-text.txt'}) },
 
   /* ---------- AI (Pro · BYOK) ---------- */
   audio_to_srt:{ cat:'ai', title:"אודיו → כתוביות (SRT)", desc:"תמלול עם בינה", in:'file', accept:AUD_ACCEPT, tag:'ai', out:'text',
@@ -1210,6 +1323,12 @@ function makeOpt(o){
     const t=el('div','toggle'+(cv.opts[o.key]?' on':'')); t.onclick=()=>{ cv.opts[o.key]=!cv.opts[o.key]; t.classList.toggle('on'); }; row.appendChild(t);
   } else if(o.type==='color'){
     const inp=el('input'); inp.type='color'; inp.value=o.def; inp.oninput=()=>cv.opts[o.key]=inp.value; row.appendChild(inp);
+  } else if(o.type==='text'){
+    const inp=el('input','txt'); inp.type='text'; inp.value=o.def||''; if(o.placeholder)inp.placeholder=o.placeholder;
+    inp.oninput=()=>cv.opts[o.key]=inp.value; row.appendChild(inp);
+  } else if(o.type==='time'){
+    const inp=el('input','txt'); inp.type='text'; inp.value=o.def||''; inp.placeholder='mm:ss'; inp.inputMode='numeric';
+    inp.oninput=()=>cv.opts[o.key]=inp.value; row.appendChild(inp);
   }
   return row;
 }
