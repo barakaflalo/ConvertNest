@@ -389,7 +389,7 @@ kbd{background:var(--card-2);border:1px solid var(--line);border-radius:6px;padd
 </script>
 <script>
 /* ---------- VERSION ---------- */
-const APP_VERSION = "1.0.6";
+const APP_VERSION = "1.0.7";
 
 /* ---------- STORAGE SHIM (localStorage + memory fallback) ---------- */
 const store = (()=>{ let mem={}; let ok=true;
@@ -696,8 +696,8 @@ LIB.xlsx = ()=>loadScript([...cdnjs('xlsx','0.18.5','xlsx.full.min.js'),...cdn('
 LIB.mammoth = ()=>loadScript([...cdn('mammoth','1.6.0','mammoth.browser.min.js')], ()=>window.mammoth);
 LIB.heic = ()=>loadScript([...cdn('heic2any','0.0.4','dist/heic2any.min.js')], ()=>window.heic2any);
 LIB.yaml = ()=>loadScript([...cdnjs('js-yaml','4.1.0','js-yaml.min.js'),...cdn('js-yaml','4.1.0','dist/js-yaml.min.js')], ()=>window.jsyaml);
-/* node-qrcode encodes UTF-8 correctly (the old qrcodejs mangled Hebrew). */
-LIB.qr = ()=>loadScript([...cdn('qrcode','1.5.3','build/qrcode.min.js')], ()=>window.QRCode && window.QRCode.toCanvas);
+/* qrcode-generator: reliably on CDN + we force UTF-8 so Hebrew encodes correctly. */
+LIB.qr = ()=>loadScript([...cdn('qrcode-generator','1.4.4','qrcode.js')], ()=>window.qrcode);
 </script>
 <script>
 /* ============================================================
@@ -961,9 +961,17 @@ function b64DecodeText(t){ return decodeURIComponent(escape(atob(t.trim()))); }
 function fileToDataURI(file){ return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);}); }
 function textToHex(t){ return Array.from(new TextEncoder().encode(t)).map(b=>b.toString(16).padStart(2,'0')).join(' '); }
 function hexToText(h){ const bytes=h.trim().split(/\s+/).map(x=>parseInt(x,16)); return new TextDecoder().decode(new Uint8Array(bytes)); }
-async function textToQR(t){ await LIB.qr(); const cv=el('canvas');
-  await window.QRCode.toCanvas(cv, t, {width:512, margin:2, errorCorrectionLevel:'M'});
-  return canvasToBlob(cv,'image/png',1); }
+async function textToQR(t){
+  await LIB.qr(); const qg=window.qrcode;
+  // Force UTF-8 Byte mode so Hebrew/Arabic/emoji encode correctly.
+  qg.stringToBytes = (s)=> Array.from(new TextEncoder().encode(s));
+  const qr=qg(0,'M'); qr.addData(t,'Byte'); qr.make();
+  const n=qr.getModuleCount(); const target=512; const cell=Math.max(2,Math.floor(target/(n+8))); const margin=cell*4;
+  const size=n*cell+margin*2; const cv=el('canvas'); cv.width=size; cv.height=size;
+  const ctx=cv.getContext('2d'); ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,size,size); ctx.fillStyle='#000000';
+  for(let r=0;r<n;r++)for(let c=0;c<n;c++){ if(qr.isDark(r,c)) ctx.fillRect(margin+c*cell,margin+r*cell,cell,cell); }
+  return canvasToBlob(cv,'image/png',1);
+}
 </script>
 <script>
 /* ============================================================
