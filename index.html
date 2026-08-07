@@ -389,7 +389,7 @@ kbd{background:var(--card-2);border:1px solid var(--line);border-radius:6px;padd
 </script>
 <script>
 /* ---------- VERSION ---------- */
-const APP_VERSION = "1.0.5";
+const APP_VERSION = "1.0.6";
 
 /* ---------- STORAGE SHIM (localStorage + memory fallback) ---------- */
 const store = (()=>{ let mem={}; let ok=true;
@@ -869,16 +869,19 @@ async function mp3ToMp4(imgFile,audioFile,{aspect='16:9',waveform=false,bg='#0a0
   const imgU8=await fileToU8(imgFile), audU8=await fileToU8(audioFile);
   let args;
   if(waveform){
+    // animated waveform needs a real frame rate; keep it modest (10fps) + ultrafast
     const wh=Math.round(H*0.26);
     const fc=`[0:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=${bgHex},setsar=1[bg];`+
-             `[1:a]showwaves=s=${W}x${wh}:mode=cline:rate=25:colors=0xffffffcc[w];`+
+             `[1:a]showwaves=s=${W}x${wh}:mode=cline:rate=10:colors=0xffffffcc[w];`+
              `[bg][w]overlay=0:${H-wh}[v]`;
-    args=['-loop','1','-i',imgName,'-i',audName,'-filter_complex',fc,'-map','[v]','-map','1:a',
-          '-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-shortest','out.mp4'];
+    args=['-loop','1','-framerate','10','-i',imgName,'-i',audName,'-filter_complex',fc,'-map','[v]','-map','1:a',
+          '-c:v','libx264','-preset','ultrafast','-r','10','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-shortest','out.mp4'];
   }else{
+    // STATIC image: encode at 1 fps (nothing moves) → ~30x fewer frames than 30fps.
+    // This is the single biggest speed win for the WASM engine.
     const vf=`scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=${bgHex},setsar=1`;
-    args=['-loop','1','-i',imgName,'-i',audName,'-vf',vf,'-tune','stillimage',
-          '-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-shortest','out.mp4'];
+    args=['-loop','1','-framerate','1','-i',imgName,'-i',audName,'-vf',vf,'-tune','stillimage',
+          '-c:v','libx264','-preset','ultrafast','-r','1','-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-shortest','out.mp4'];
   }
   const out=await runFFmpeg([{name:imgName,data:imgU8},{name:audName,data:audU8}],args,'out.mp4',onProgress);
   return new Blob([out],{type:'video/mp4'});
