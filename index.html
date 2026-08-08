@@ -389,7 +389,7 @@ kbd{background:var(--card-2);border:1px solid var(--line);border-radius:6px;padd
 </script>
 <script>
 /* ---------- VERSION ---------- */
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.1.1";
 
 /* ---------- STORAGE SHIM (localStorage + memory fallback) ---------- */
 const store = (()=>{ let mem={}; let ok=true;
@@ -993,18 +993,17 @@ function parseRanges(str,total){ // "2,5-7" (1-based) -> Set of 0-based indices
   });
   return set;
 }
-/* trim audio/video, preserving container (fast stream copy) */
-async function trimMedia(file,start,end,onProgress){
-  const ext=(extOf(file)||'.mp4').slice(1); const inName='input.'+ext, outName='out.'+ext;
+/* trim audio/video accurately. Input-seek (-ss before -i) + RE-ENCODE (no
+   -c copy) so the cut starts exactly at `start` (copy snapped to keyframes /
+   ignored the start point). */
+async function trimMedia(file,start,end,isVideo,onProgress){
+  const ext=(extOf(file)||(isVideo?'.mp4':'.mp3')).slice(1); const inName='input.'+ext, outName='out.'+ext;
+  const dur=(end>0 && end>start)?(end-start):null;
   const args=['-ss',String(start||0),'-i',inName];
-  if(end>0 && end>start) args.push('-t',String(end-(start||0)));
-  args.push('-c','copy',outName);
-  let out;
-  try{ out=await runFFmpeg([{name:inName,data:await fileToU8(file)}],args,outName,onProgress); }
-  catch(e){ // some formats can't stream-copy after seek → re-encode fallback
-    const a2=['-ss',String(start||0),'-i',inName]; if(end>0&&end>start)a2.push('-t',String(end-(start||0))); a2.push(outName);
-    out=await runFFmpeg([{name:inName,data:await fileToU8(file)}],a2,outName,onProgress);
-  }
+  if(dur) args.push('-t',String(dur));
+  if(isVideo){ args.push('-c:v','libx264','-preset','ultrafast','-pix_fmt','yuv420p','-c:a','aac'); }
+  args.push(outName);
+  const out=await runFFmpeg([{name:inName,data:await fileToU8(file)}],args,outName,onProgress);
   return new Blob([out],{type:mimeFor(ext)});
 }
 /* PDF: merge / split / delete pages / compress */
@@ -1056,6 +1055,36 @@ async function readCode(file){
   finally{ URL.revokeObjectURL(url); }
 }
 
+/* Media player (+ optional trim bars) shown when an audio/video file is chosen.
+   Sets cv.opts.start / cv.opts.end (seconds) when withTrim. */
+function fmtClock(t){ t=Math.max(0,Math.floor(t||0)); const m=Math.floor(t/60), s=t%60; return m+':'+String(s).padStart(2,'0'); }
+function renderMediaTool(file,isVideo,withTrim,hostSel){
+  const host=document.querySelector(hostSel||'#cvMedia'); if(!host||!file) return; host.innerHTML='';
+  const url=URL.createObjectURL(file);
+  const box=el('div','opts');
+  const media=el(isVideo?'video':'audio'); media.src=url; media.controls=true; media.preload='metadata';
+  media.style.width='100%'; if(isVideo){ media.style.maxHeight='240px'; media.style.borderRadius='12px'; media.style.background='#000'; }
+  box.appendChild(media);
+  if(withTrim){
+    cv.opts.start=0; cv.opts.end=0;
+    const lbl=el('div'); lbl.style.cssText='display:flex;justify-content:space-between;font-weight:800;color:var(--accent);font-size:14px;margin-top:6px';
+    const lS=el('span'), lE=el('span'); lbl.appendChild(lS); lbl.appendChild(lE);
+    const s1=el('input'); s1.type='range'; s1.min=0; s1.step=0.5; s1.value=0;
+    const s2=el('input'); s2.type='range'; s2.min=0; s2.step=0.5; s2.value=0;
+    [s1,s2].forEach(s=>{ s.style.width='100%'; s.style.accentColor='var(--accent)'; s.style.marginTop='6px'; });
+    const setLbl=()=>{ lS.textContent='▶ '+T('opt_start')+': '+fmtClock(+s1.value); lE.textContent='⏹ '+T('opt_end')+': '+fmtClock(+s2.value); };
+    media.onloadedmetadata=()=>{ const d=Math.floor(media.duration||0); s1.max=d; s2.max=d; s2.value=d; cv.opts.start=0; cv.opts.end=d; setLbl(); };
+    s1.oninput=()=>{ if(+s1.value>+s2.value)s1.value=s2.value; cv.opts.start=+s1.value; media.currentTime=+s1.value; setLbl(); };
+    s2.oninput=()=>{ if(+s2.value<+s1.value)s2.value=s1.value; cv.opts.end=+s2.value; media.currentTime=+s2.value; setLbl(); };
+    setLbl();
+    box.appendChild(lbl); box.appendChild(s1); box.appendChild(s2);
+    const hint=el('div'); hint.style.cssText='color:var(--text-2);font-size:12px;text-align:center;margin-top:8px';
+    hint.textContent = state.lang==='he'?'גרור את שני הבָּרים לבחירת קטע — הנגן קופץ לנקודה שבחרת.':'Drag the two bars to pick a section — the player jumps to it.';
+    box.appendChild(hint);
+  }
+  host.appendChild(box);
+}
+
 </script>
 <script>
 /* ============================================================
@@ -1094,16 +1123,15 @@ const CONVERTERS = {
     run:async(fs,o,p)=>{ const ext=extFromMime(o.to); const b=await runBatch(fs, async(f)=>{ const blob=await imageConvert(f,{to:o.to,quality:o.quality,width:+o.width||0}); return {blob,name:renameExt(f.name,ext)}; }, p); return {blob:b,name:'converted-images.zip'}; } },
 
   /* ---------- AUDIO ---------- */
-  audio_convert:{ cat:'audio', title:"אודיו → MP3 · WAV · M4A · OGG · FLAC", desc:"המרה בין פורמטי שמע", in:'file', accept:AUD_ACCEPT, tag:'ff',
+  audio_convert:{ cat:'audio', title:"אודיו → MP3 · WAV · M4A · OGG · FLAC", desc:"המרה בין פורמטי שמע", in:'file', accept:AUD_ACCEPT, tag:'ff', media:true,
     opts:[{type:'seg',key:'to',label:'opt_format',def:'mp3',options:[['mp3','MP3'],['wav','WAV'],['m4a','M4A'],['ogg','OGG'],['flac','FLAC'],['opus','OPUS']]}],
     run:async(f,o,p)=>{ const b=await mediaConvert(f,o.to,audioArgs(o.to),p); return {blob:b,name:renameExt(f.name,o.to)}; } },
 
-  extract_audio:{ cat:'audio', title:"וידאו → MP3", desc:"חילוץ פס הקול מסרטון", in:'file', accept:VID_ACCEPT, tag:'ff',
+  extract_audio:{ cat:'audio', title:"וידאו → MP3", desc:"חילוץ פס הקול מסרטון", in:'file', accept:VID_ACCEPT, tag:'ff', media:true, video:true,
     opts:[], run:async(f,o,p)=>{ const b=await mediaConvert(f,'mp3',['-vn','-c:a','libmp3lame','-b:a','192k'],p); return {blob:b,name:renameExt(f.name,'mp3')}; } },
 
-  audio_trim:{ cat:'audio', title:"חיתוך אודיו", desc:"בחר קטע (התחלה/סוף)", in:'file', accept:AUD_ACCEPT, tag:'ff',
-    opts:[{type:'time',key:'start',label:'opt_start',def:'0:00'},{type:'time',key:'end',label:'opt_end',def:''}],
-    run:async(f,o,p)=>{ const b=await trimMedia(f,parseTime(o.start),parseTime(o.end),p); return {blob:b,name:renameExt(f.name,'trim.'+((extOf(f)||'.mp3').slice(1)))}; } },
+  audio_trim:{ cat:'audio', title:"חיתוך אודיו", desc:"נגן — גרור לבחירת קטע", in:'file', accept:AUD_ACCEPT, tag:'ff', trim:true,
+    opts:[], run:async(f,o,p)=>{ const b=await trimMedia(f,+o.start||0,+o.end||0,false,p); return {blob:b,name:renameExt(f.name,'trim.'+((extOf(f)||'.mp3').slice(1)))}; } },
 
   /* ---------- VIDEO ---------- */
   mp3_to_mp4:{ cat:'video', title:"MP3 + תמונה → MP4", desc:"הפוך אודיו לסרטון וידאו", in:'imgaudio', tag:'ff', featured:true,
@@ -1114,21 +1142,20 @@ const CONVERTERS = {
     ],
     run:async(inp,o,p)=>{ const b=await mp3ToMp4(inp.img,inp.audio,{aspect:o.aspect,waveform:o.waveform,bg:o.bg},p); return {blob:b,name:'video.mp4'}; } },
 
-  video_convert:{ cat:'video', title:"וידאו → MP4 · WEBM · MOV · MKV", desc:"המרה בין פורמטי וידאו", in:'file', accept:VID_ACCEPT, tag:'ff',
+  video_convert:{ cat:'video', title:"וידאו → MP4 · WEBM · MOV · MKV", desc:"המרה בין פורמטי וידאו", in:'file', accept:VID_ACCEPT, tag:'ff', media:true, video:true,
     opts:[{type:'seg',key:'to',label:'opt_format',def:'mp4',options:[['mp4','MP4'],['webm','WEBM'],['mov','MOV'],['mkv','MKV']]}],
     run:async(f,o,p)=>{ const b=await mediaConvert(f,o.to,videoArgs(o.to),p); return {blob:b,name:renameExt(f.name,o.to)}; } },
 
-  video_to_gif:{ cat:'video', title:"וידאו → GIF", desc:"קטע קצר לאנימציית GIF", in:'file', accept:VID_ACCEPT, tag:'ff',
+  video_to_gif:{ cat:'video', title:"וידאו → GIF", desc:"קטע קצר לאנימציית GIF", in:'file', accept:VID_ACCEPT, tag:'ff', media:true, video:true,
     opts:[{type:'range',key:'fps',label:'opt_fps',min:5,max:24,step:1,def:12,fmt:v=>v},{type:'number',key:'width',label:'opt_size',def:480}],
     run:async(f,o,p)=>{ const b=await videoToGif(f,{fps:+o.fps,width:+o.width||480},p); return {blob:b,name:renameExt(f.name,'gif')}; } },
 
-  compress_video:{ cat:'video', title:"דחיסת וידאו", desc:"הקטנת גודל הקובץ (MP4)", in:'file', accept:VID_ACCEPT, tag:'ff',
+  compress_video:{ cat:'video', title:"דחיסת וידאו", desc:"הקטנת גודל הקובץ (MP4)", in:'file', accept:VID_ACCEPT, tag:'ff', media:true, video:true,
     opts:[{type:'range',key:'crf',label:'opt_quality',min:20,max:34,step:1,def:28,fmt:v=>'CRF '+v}],
     run:async(f,o,p)=>{ const b=await mediaConvert(f,'mp4',['-c:v','libx264','-crf',String(o.crf),'-preset','veryfast','-c:a','aac','-b:a','128k','-pix_fmt','yuv420p'],p); return {blob:b,name:renameExt(f.name,'min.mp4')}; } },
 
-  video_trim:{ cat:'video', title:"חיתוך וידאו", desc:"בחר קטע (התחלה/סוף)", in:'file', accept:VID_ACCEPT, tag:'ff',
-    opts:[{type:'time',key:'start',label:'opt_start',def:'0:00'},{type:'time',key:'end',label:'opt_end',def:''}],
-    run:async(f,o,p)=>{ const b=await trimMedia(f,parseTime(o.start),parseTime(o.end),p); return {blob:b,name:renameExt(f.name,'trim.'+((extOf(f)||'.mp4').slice(1)))}; } },
+  video_trim:{ cat:'video', title:"חיתוך וידאו", desc:"נגן — גרור לבחירת קטע", in:'file', accept:VID_ACCEPT, tag:'ff', trim:true, video:true,
+    opts:[], run:async(f,o,p)=>{ const b=await trimMedia(f,+o.start||0,+o.end||0,true,p); return {blob:b,name:renameExt(f.name,'trim.'+((extOf(f)||'.mp4').slice(1)))}; } },
 
   /* ---------- DOCUMENTS ---------- */
   pdf_to_img:{ cat:'doc', title:"PDF → תמונות", desc:"עמוד בודד או כל העמודים (ZIP)", in:'file', accept:".pdf,application/pdf",
@@ -1251,18 +1278,19 @@ function openConverter(id){
   const w=$('#cvWork'); w.innerHTML='';
 
   // ----- INPUT -----
-  if(conv.in==='file'){ w.appendChild(makeDrop(conv.accept,false,fs=>{ cv.file=fs[0]; renderChips(); })); }
+  if(conv.in==='file'){ w.appendChild(makeDrop(conv.accept,false,fs=>{ cv.file=fs[0]; renderChips(); if(conv.media||conv.trim) renderMediaTool(cv.file, !!conv.video, !!conv.trim); })); }
   else if(conv.in==='files'){ w.appendChild(makeDrop(conv.accept,true,fs=>{ cv.files=cv.files.concat(fs); renderChips(); })); }
   else if(conv.in==='imgaudio'){
     const box=el('div','',''); box.style.display='grid'; box.style.gap='12px';
     box.appendChild(makeDrop(IMG_ACCEPT,false,fs=>{ cv.imgFile=fs[0]; renderChips(); },'🖼️ '+T('src_image')));
-    box.appendChild(makeDrop(AUD_ACCEPT,false,fs=>{ cv.audFile=fs[0]; renderChips(); },'🎵 '+T('src_audio')));
+    box.appendChild(makeDrop(AUD_ACCEPT,false,fs=>{ cv.audFile=fs[0]; renderChips(); renderMediaTool(cv.audFile,false,false); },'🎵 '+T('src_audio')));
     w.appendChild(box);
   }
   else if(conv.in==='text'){
     const ta=el('textarea','txt'); ta.placeholder='…'; ta.oninput=()=>cv.textVal=ta.value; w.appendChild(ta);
   }
   const chipWrap=el('div'); chipWrap.id='cvChips'; chipWrap.style.display='grid'; chipWrap.style.gap='8px'; w.appendChild(chipWrap);
+  const mediaWrap=el('div'); mediaWrap.id='cvMedia'; w.appendChild(mediaWrap);
 
   // ----- OPTIONS -----
   if(conv.opts&&conv.opts.length){ const box=el('div','opts'); (conv.opts).forEach(o=>box.appendChild(makeOpt(o))); w.appendChild(box); }
@@ -1302,9 +1330,9 @@ function renderChips(){
     c.innerHTML=`<span class="fi">📎</span><div><div class="fn">${f.name}</div><div class="fs">${fmtBytes(f.size)}${big?' ⚠️':''}</div></div>`;
     const rm=el('span','rm','✕'); rm.onclick=onRm; c.appendChild(rm); wrap.appendChild(c);
     if(big){ const wb=el('div','warn-box',T('err_bigfile')); wrap.appendChild(wb); } };
-  if(cv.conv.in==='file'&&cv.file) add(cv.file,()=>{cv.file=null;renderChips();});
+  if(cv.conv.in==='file'&&cv.file) add(cv.file,()=>{cv.file=null; const m=$('#cvMedia'); if(m)m.innerHTML=''; renderChips();});
   if(cv.conv.in==='files') cv.files.forEach((f,i)=>add(f,()=>{cv.files.splice(i,1);renderChips();}));
-  if(cv.conv.in==='imgaudio'){ if(cv.imgFile)add(cv.imgFile,()=>{cv.imgFile=null;renderChips();}); if(cv.audFile)add(cv.audFile,()=>{cv.audFile=null;renderChips();}); }
+  if(cv.conv.in==='imgaudio'){ if(cv.imgFile)add(cv.imgFile,()=>{cv.imgFile=null;renderChips();}); if(cv.audFile)add(cv.audFile,()=>{cv.audFile=null; const m=$('#cvMedia'); if(m)m.innerHTML=''; renderChips();}); }
 }
 function makeOpt(o){
   const row=el('div','opt-row'); row.appendChild(el('label',null,T(o.label)));
